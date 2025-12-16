@@ -4,6 +4,7 @@ Claude API integration - generates file changes based on prompts
 import os
 import json
 import logging
+import re
 from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,29 @@ if not api_key:
     raise ValueError("CLAUDE_API_KEY not found in environment variables")
 client = Anthropic(api_key=api_key)
 
+def extract_json_from_response(response_text):
+    """Extract JSON from Claude response that may contain explanation text"""
+    
+    # First, try to find JSON wrapped in markdown code fences
+    json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+    if json_match:
+        return json_match.group(1).strip()
+    
+    # If no markdown fences, try to find raw JSON (starts with {)
+    json_start = response_text.find('{')
+    if json_start != -1:
+        # Find the matching closing brace by counting braces
+        brace_count = 0
+        for i in range(json_start, len(response_text)):
+            if response_text[i] == '{':
+                brace_count += 1
+            elif response_text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    return response_text[json_start:i+1]
+    
+    return response_text.strip()
+
 async def get_file_changes(prompt: str, website_context: str) -> dict:
     """
     Send prompt to Claude and get file changes
@@ -21,7 +45,6 @@ async def get_file_changes(prompt: str, website_context: str) -> dict:
     """
     
     system_prompt = """You are an expert web developer helping students modify the Programming Party website.
-
 The website is built with 11ty (Eleventy) and includes:
 - Layout templates in src/_layouts/
 - Page files in src/pages/ (MUST use this directory, not src/ root!)
@@ -31,7 +54,6 @@ The website is built with 11ty (Eleventy) and includes:
 CRITICAL RULES - READ CAREFULLY:
 
 1. **COMPLETE FILE CONTENT**: You will receive the COMPLETE content of each file below. When you modify a file, return the ENTIRE new content from start to finish. Do NOT truncate, summarize, or return only the changed lines. The entire content you return will be written exactly as-is to the file.
-
 2. **File Paths**: 
    - Page files MUST be in src/pages/ (e.g., src/pages/about.md)
    - CSS MUST be at src/assets/css/style.css (do NOT split into multiple CSS files)
@@ -60,7 +82,7 @@ CRITICAL RULES - READ CAREFULLY:
    - Escape newlines as \\n (not actual line breaks)
    - Escape backslashes as \\\\
    - Escape quotes as \\"
-   - No markdown code blocks, no explanations, JSON ONLY
+   - Return ONLY the JSON block, no explanations or markdown code blocks
 
 When a student makes a request, you should:
 1. Read the complete file contents provided
@@ -76,7 +98,7 @@ When a student makes a request, you should:
 
 Student request: {prompt}
 
-Please analyze this request and provide the file changes needed to implement it. Return the complete new content for any files that need to be modified."""
+Please analyze this request and provide the file changes needed to implement it. Return ONLY the JSON object with file changes - no explanations, no markdown code blocks."""
 
     try:
         response = client.messages.create(
@@ -88,23 +110,14 @@ Please analyze this request and provide the file changes needed to implement it.
             ]
         )
         
-        # Extract JSON from response
+        # Extract text from response
         response_text = response.content[0].text.strip()
         
-        # Try to parse as JSON
-        if response_text.startswith("```"):
-            # Remove markdown code blocks if present
-            response_text = response_text.replace("```json", "").replace("```", "").strip()
+        # Extract JSON from response (handles explanation text + JSON)
+        json_text = extract_json_from_response(response_text)
         
-        try:
-            file_changes = json.loads(response_text)
-        except json.JSONDecodeError:
-            # If standard parsing fails, try fixing common issues
-            # Replace actual newlines with \\n in the content strings
-            import re
-            # This is a hacky fix but necessary for Claude's output
-            response_text = re.sub(r'(?<!\\)"content":\s*"', '"content": "', response_text)
-            file_changes = json.loads(response_text)
+        # Parse JSON
+        file_changes = json.loads(json_text)
         
         logger.info(f"Claude generated changes for {len(file_changes.get('files', []))} files")
         return file_changes
