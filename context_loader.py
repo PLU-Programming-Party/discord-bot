@@ -25,34 +25,33 @@ def get_website_context() -> str:
     context += _get_tree_structure(repo_path, max_depth=3)
     context += "\n```\n\n"
     
-    # Add key configuration files
+    # Add key configuration files - LOAD COMPLETE CONTENT
     key_files = [
-        ".eleventy.js",
-        "package.json",
-        "src/_data/projects.json",
-        "src/_data/people.json",
+        "src/_layouts/base.njk",
         "src/assets/css/style.css",
-        "src/index.njk",
-        "src/projects.njk",
-        "src/people.njk",
-        "src/about.md"
+        "src/pages/index.md",
+        "src/pages/about.md",
+        "src/pages/people.njk",
+        "src/pages/projects.njk",
     ]
     
-    context += "## Key Files Content\n\n"
+    context += "## Complete File Contents\n\n"
+    context += "⚠️ IMPORTANT: Below are the COMPLETE contents of key files. When returning changes, return the ENTIRE file content, not just fragments.\n\n"
     
     for file_rel_path in key_files:
         file_path = os.path.join(repo_path, file_rel_path)
         if os.path.exists(file_path):
             context += f"### {file_rel_path}\n\n"
             try:
-                with open(file_path, "r") as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n... (truncated)"
+                    # Show complete content with line count
+                    line_count = len(content.split('\n'))
+                    context += f"**Complete file ({line_count} lines)**\n\n"
                     context += f"```\n{content}\n```\n\n"
             except Exception as e:
                 logger.warning(f"Could not read {file_rel_path}: {e}")
-                context += f"(Could not read file)\n\n"
+                context += f"(Could not read file: {e})\n\n"
         else:
             context += f"### {file_rel_path}\n\n(File not found)\n\n"
     
