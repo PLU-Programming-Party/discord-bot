@@ -80,7 +80,7 @@ Please analyze this request and provide the file changes needed to implement it.
 
     try:
         response = client.messages.create(
-            model="claude-opus-4.5",
+            model="claude-sonnet-4.5",
             max_tokens=4096,
             system=system_prompt,
             messages=[
