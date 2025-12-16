@@ -60,6 +60,18 @@ async def process_suggestion(message: discord.Message):
     
     state = user_conversations[user_id]
     
+    # Check if user is asking to retry without re-asking questions
+    retry_keywords = ["try again", "retry", "again", "run it", "run that", "do it", "execute"]
+    is_retry_request = any(keyword in user_prompt.lower() for keyword in retry_keywords)
+    
+    # If retry request and we already gathered requirements, skip to implementation
+    if is_retry_request and state.phase == "gathering" and state.requirements and state.requirements.get("ready_to_implement"):
+        logger.info(f"User {message.author.name} requesting retry - skipping to implementation")
+        state.phase = "implementing"
+        await message.reply("⏳ Retrying... Generating changes...")
+        await implement_changes(message, state, website_context)
+        return
+    
     # PHASE 1: Gather Requirements
     if state.phase == "gathering":
         logger.info("Phase: Gathering Requirements")
