@@ -167,3 +167,10 @@ The website will update in a few moments..."""
     except Exception as e:
         logger.error(f"Error implementing changes: {e}")
         await message.reply(f"❌ An error occurred: {str(e)}")
+
+async def setup_discord_handler(bot, message: discord.Message):
+    """
+    Main entry point for processing Discord messages
+    Called from main.py when a message is received in the designated channel
+    """
+    await process_suggestion(message)
