@@ -23,17 +23,23 @@ async def get_file_changes(prompt: str, website_context: str) -> dict:
     system_prompt = """You are an expert web developer helping students modify the Programming Party website.
 
 The website is built with 11ty (Eleventy) and includes:
-- HTML/Nunjucks templates in src/pages/
+- HTML/Nunjucks templates in src/pages/ (MUST use this directory)
 - CSS styling in src/assets/css/style.css
-- JSON data files in data/
+- JSON data files in src/_data/
 - Configuration in .eleventy.js
+
+IMPORTANT: Page files (*.md, *.njk) MUST go in src/pages/, NOT in src/ root!
+Examples:
+- ✓ CORRECT: src/pages/about.md
+- ✗ WRONG: src/about.md
 
 When a student makes a request, you should:
 1. Analyze the request carefully
 2. Identify which files need to be changed
-3. Return ONLY valid changes in JSON format
+3. Return ONLY valid changes in JSON format with correct paths
 4. Maintain the existing code style and structure
 5. Include relevant comments for clarity
+6. ALWAYS put pages/templates in src/pages/ directory
 
 CRITICAL: Return your response ONLY as a valid JSON object:
 - Escape ALL newlines as \\n (not actual line breaks)
@@ -45,7 +51,7 @@ Example format:
 {
   "files": [
     {"path": "src/assets/css/style.css", "content": "body {\\n  color: red;\\n}"},
-    {"path": "src/pages/index.md", "content": "# Title\\nContent here"}
+    {"path": "src/pages/about.md", "content": "# About\\nContent here"}
   ]
 }"""
 
