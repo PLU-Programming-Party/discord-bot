@@ -146,6 +146,10 @@ async def implement_changes(message: discord.Message, state: ConversationState, 
         num_files = len(file_changes.get("files", []))
         logger.info(f"Generated changes for {num_files} files")
         
+        if num_files == 0:
+            await message.reply("❌ No changes were generated. The request may be unclear or not appropriate. Try being more specific or ask to try again.")
+            return
+        
         # Apply changes to repository
         await message.reply(f"📝 Applying {num_files} file changes...")
         commit_hash = apply_changes_and_commit(file_changes, full_prompt)
