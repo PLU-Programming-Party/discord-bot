@@ -37,6 +37,11 @@ async def process_suggestion(message: discord.Message):
     """
     user_id = message.author.id
     user_prompt = message.content
+    # HAL 9000 Easter egg for users with "dav" in their name
+    if "dav" in message.author.name.lower():
+        await message.reply("I'm sorry dav, but I can't do that.")
+        return
+
     
     # Initialize or retrieve conversation
     if user_id not in user_conversations:
