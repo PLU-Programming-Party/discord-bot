@@ -19,6 +19,15 @@ async def setup_discord_handler(bot, message):
         if not prompt:
             return
         
+        # Check for rocket emoji - required to execute commands
+        if "🚀" not in prompt:
+            await message.reply(
+                "⚠️ **Rocket emoji required!** 🚀\n\n"
+                "To make changes to the website, please include a 🚀 emoji in your request.\n\n"
+                "Example: `🚀 make the title bigger and red text`"
+            )
+            return
+        
         # Send initial acknowledgment
         await message.add_reaction("⏳")
         
