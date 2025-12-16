@@ -5,7 +5,7 @@ import discord
 import logging
 from discord.ext import commands
 from claude_handler import gather_requirements, get_file_changes
-from context_loader import load_website_context
+from context_loader import get_website_context
 from github_handler import apply_changes, push_to_github
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ async def process_suggestion(message: discord.Message):
         user_conversations[user_id].add_message("user", user_prompt)
     
     # Load website context
-    website_context = load_website_context()
+    website_context = get_website_context()
     if not website_context:
         await message.reply("I couldn't load the website context. Please try again later.")
         return
