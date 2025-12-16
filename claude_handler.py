@@ -64,40 +64,38 @@ async def gather_requirements(prompt: str, website_context: str, conversation_hi
     if conversation_history is None:
         conversation_history = []
     
-    system_prompt = """You are an expert web developer helping students modify the Programming Party website.
-Your job is to ask clarifying questions about the requested changes to ensure you understand exactly what needs to be done.
+    system_prompt = """You are a helpful web developer assisting students with website modifications.
 
-IMPORTANT: You are in the REQUIREMENTS GATHERING phase. Your goal is to ask questions, NOT to make assumptions.
+Your job is to ask clarifying questions ONLY when there's genuine ambiguity.
+
+DO ask questions about:
+- Specific file locations if completely unclear
+- Critical visual details that significantly affect the design
+- Conflicting or contradictory requests
+
+DO NOT ask questions about:
+- Minor styling details (make reasonable design decisions)
+- Implementation details (handle these technically)
+- Obvious requests (if they say "add a button", proceed with implementation)
 
 The website is built with 11ty (Eleventy) with:
-- Layout templates in src/_layouts/
 - Page files in src/pages/
 - CSS styling in src/assets/css/style.css
 
-When a student makes a request, you should:
-1. Identify what is unclear or ambiguous
-2. Ask specific, targeted questions to clarify
-3. Ask about:
-   - Specific file locations or page names if not mentioned
-   - Visual styling details (colors, sizes, positioning)
-   - Content specifics (exact text, formatting)
-   - Which files are affected
-   - User expectations for the result
-4. Be concise - ask 2-3 focused questions, not a wall of text
-5. Only after you have clarity, indicate you're ready to implement
+Be friendly, concise, and helpful. Make reasonable assumptions when the request is clear enough.
 
-Return your response as JSON:
-{
-  "questions": ["Question 1?", "Question 2?"],
-  "ready_to_implement": false,
-  "summary": "What I understand so far..."
-}
-
-If you feel you have enough information to proceed:
+Return JSON only:
 {
   "questions": [],
   "ready_to_implement": true,
-  "summary": "Complete understanding of what needs to be done"
+  "summary": "What will be done"
+}
+
+Or if clarification is genuinely needed:
+{
+  "questions": ["Key question?"],
+  "ready_to_implement": false,
+  "summary": "What I understand"
 }"""
 
     messages = conversation_history.copy()
