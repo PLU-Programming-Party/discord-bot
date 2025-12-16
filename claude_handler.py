@@ -3,6 +3,7 @@ Claude API integration - generates file changes based on prompts
 """
 import os
 import json
+import asyncio
 import logging
 import re
 from anthropic import Anthropic
@@ -113,7 +114,9 @@ Student request: {prompt}
 Ask clarifying questions to understand exactly what changes are needed. Do NOT make assumptions."""})
     
     try:
-        response = client.messages.create(
+        # Run synchronous API call in thread pool to avoid blocking event loop
+        response = await asyncio.to_thread(
+            client.messages.create,
             model="claude-sonnet-4-20250514",
             max_tokens=1024,
             system=system_prompt,
@@ -206,7 +209,9 @@ Student request: {prompt}
 Please analyze this request and provide the file changes needed to implement it. Return ONLY the JSON object with file changes - no explanations, no markdown code blocks."""
 
     try:
-        response = client.messages.create(
+        # Run synchronous API call in thread pool to avoid blocking event loop
+        response = await asyncio.to_thread(
+            client.messages.create,
             model="claude-sonnet-4-20250514",
             max_tokens=16384,
             system=system_prompt,
