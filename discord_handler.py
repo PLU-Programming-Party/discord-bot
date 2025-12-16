@@ -1,99 +1,164 @@
 """
-Discord event handler - processes messages from #website-prompts
+Discord bot interactions and message handling
 """
 import discord
 import logging
-from claude_handler import get_file_changes
-from github_handler import apply_changes_and_commit
-from context_loader import get_website_context
+from discord.ext import commands
+from claude_handler import gather_requirements, get_file_changes
+from context_loader import load_website_context
+from github_handler import apply_changes, push_to_github
 
 logger = logging.getLogger(__name__)
 
-async def setup_discord_handler(bot, message):
+# Store ongoing conversations by user ID
+user_conversations = {}
+
+class ConversationState:
+    def __init__(self, user_id, initial_prompt):
+        self.user_id = user_id
+        self.initial_prompt = initial_prompt
+        self.conversation_history = []
+        self.requirements = None
+        self.phase = "gathering"  # "gathering" or "implementing"
+    
+    def add_message(self, role, content):
+        """Add a message to the conversation history"""
+        self.conversation_history.append({"role": role, "content": content})
+    
+    def get_full_context(self):
+        """Get the full conversation for Claude"""
+        return self.conversation_history
+
+async def process_suggestion(message: discord.Message):
     """
-    Handle incoming Discord messages and orchestrate the workflow
+    Process a user's website modification suggestion
+    Phase 1: Gather requirements (ask clarifying questions)
+    Phase 2: Implement changes (once requirements are clear)
     """
-    try:
-        prompt = message.content.strip()
+    user_id = message.author.id
+    user_prompt = message.content
+    
+    # Initialize or retrieve conversation
+    if user_id not in user_conversations:
+        user_conversations[user_id] = ConversationState(user_id, user_prompt)
+        logger.info(f"Processing prompt from {message.author.name}: {user_prompt}")
+    else:
+        # User is responding to questions
+        logger.info(f"User {message.author.name} responding: {user_prompt}")
+        user_conversations[user_id].add_message("user", user_prompt)
+    
+    # Load website context
+    website_context = load_website_context()
+    if not website_context:
+        await message.reply("I couldn't load the website context. Please try again later.")
+        return
+    
+    state = user_conversations[user_id]
+    
+    # PHASE 1: Gather Requirements
+    if state.phase == "gathering":
+        logger.info("Phase: Gathering Requirements")
         
-        if not prompt:
-            return
-        
-        # Check for rocket emoji - required to execute commands
-        if "🚀" not in prompt:
-            await message.reply(
-                "⚠️ **Rocket emoji required!** 🚀\n\n"
-                "To make changes to the website, please include a 🚀 emoji in your request.\n\n"
-                "Example: `🚀 make the title bigger and red text`"
-            )
-            return
-        
-        # Send initial acknowledgment
-        await message.add_reaction("⏳")
-        
-        logger.info(f"Processing prompt: {prompt}")
-        
-        # Get website context
-        context = get_website_context()
-        
-        # Get Claude's suggestions
-        embed = discord.Embed(
-            title="🤖 Analyzing your request...",
-            description="Claude is reviewing your suggestion. This may take a moment.",
-            color=discord.Color.blue()
+        requirements = await gather_requirements(
+            state.initial_prompt,
+            website_context,
+            state.conversation_history if state.conversation_history else None
         )
-        status_msg = await message.reply(embed=embed)
         
-        # Call Claude
-        file_changes = await get_file_changes(prompt, context)
+        if requirements.get("questions"):
+            # Ask the questions
+            questions_text = "\n".join([f"• {q}" for q in requirements["questions"]])
+            response = f"I have some questions to better understand your request:\n\n{questions_text}"
+            await message.reply(response)
+            
+            # Add Claude's questions to history
+            state.add_message("assistant", f"Questions: {requirements['questions']}")
+            state.requirements = requirements
+            
+        elif requirements.get("ready_to_implement"):
+            # Ready to proceed
+            logger.info(f"Ready to implement: {requirements.get('summary')}")
+            state.phase = "implementing"
+            await message.reply("Got it! I understand the requirements. Now generating the changes...")
+            
+            # Proceed to implementation
+            await implement_changes(message, state, website_context)
+        else:
+            await message.reply("I need clarification. Could you provide more specific details about your request?")
+    
+    # PHASE 2: Implement Changes
+    elif state.phase == "implementing":
+        # Re-check if we now have enough info
+        requirements = await gather_requirements(
+            state.initial_prompt,
+            website_context,
+            state.conversation_history
+        )
+        
+        if requirements.get("ready_to_implement"):
+            logger.info("Implementing after clarifications")
+            await implement_changes(message, state, website_context)
+        else:
+            # Still need more info
+            questions_text = "\n".join([f"• {q}" for q in requirements["questions"]])
+            response = f"I still have some questions:\n\n{questions_text}"
+            await message.reply(response)
+            state.requirements = requirements
+
+async def implement_changes(message: discord.Message, state: ConversationState, website_context: str):
+    """Generate and apply the file changes"""
+    try:
+        # Full prompt with conversation context
+        full_prompt = state.initial_prompt
+        if state.conversation_history:
+            clarifications = "\n".join([
+                msg["content"] for msg in state.conversation_history if msg["role"] == "user"
+            ])
+            full_prompt = f"{state.initial_prompt}\n\nClarifications provided:\n{clarifications}"
+        
+        logger.info("Generating file changes...")
+        await message.reply("⏳ Generating changes...")
+        
+        # Get file changes from Claude
+        file_changes = await get_file_changes(full_prompt, website_context)
         
         if not file_changes:
-            await status_msg.edit(
-                embed=discord.Embed(
-                    title="❌ No changes generated",
-                    description="Claude couldn't generate changes for your request.",
-                    color=discord.Color.red()
-                )
-            )
+            await message.reply("❌ Failed to generate changes. Please try again.")
             return
         
-        # Apply changes to repo
-        embed = discord.Embed(
-            title="📝 Applying changes...",
-            description="Writing changes to the website repository.",
-            color=discord.Color.blue()
-        )
-        await status_msg.edit(embed=embed)
+        num_files = len(file_changes.get("files", []))
+        logger.info(f"Generated changes for {num_files} files")
         
-        commit_hash = apply_changes_and_commit(file_changes, prompt)
+        # Apply changes to repository
+        await message.reply(f"📝 Applying {num_files} file changes...")
+        success = apply_changes(file_changes)
         
-        # Success response
-        embed = discord.Embed(
-            title="✅ Changes deployed!",
-            description=f"Your suggestion has been applied to the website.\n\n**Commit**: `{commit_hash[:7]}`\n\nThe website will update in 2-3 minutes as GitHub Actions rebuilds and deploys.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Your request", value=prompt, inline=False)
-        files_count = len(file_changes.get("files", []))
-        embed.add_field(name="Files changed", value=f"{files_count} file(s)", inline=False)
+        if not success:
+            await message.reply("❌ Failed to apply changes to the repository.")
+            return
         
-        await status_msg.edit(embed=embed)
+        # Push to GitHub
+        await message.reply("🚀 Pushing to GitHub...")
+        push_success = push_to_github()
         
-        # Remove loading reaction
-        await message.remove_reaction("⏳", bot.user)
-        
-        # Add success reaction
-        await message.add_reaction("✅")
-        
-        logger.info(f"Successfully deployed changes. Commit: {commit_hash}")
-        
+        if push_success:
+            changed_files = [f["path"] for f in file_changes.get("files", [])]
+            files_list = "\n".join([f"✅ {f}" for f in changed_files])
+            confirmation = f"""✨ Changes deployed successfully!
+
+Modified files:
+{files_list}
+
+The website will update in a few moments..."""
+            await message.reply(confirmation)
+            logger.info(f"Successfully deployed changes")
+            
+            # Clean up conversation
+            if state.user_id in user_conversations:
+                del user_conversations[state.user_id]
+        else:
+            await message.reply("⚠️ Changes applied but failed to push to GitHub. Please check the repository.")
+    
     except Exception as e:
-        logger.error(f"Error processing prompt: {e}")
-        
-        embed = discord.Embed(
-            title="❌ Error",
-            description=f"Something went wrong: {str(e)}",
-            color=discord.Color.red()
-        )
-        await message.reply(embed=embed)
-        await message.add_reaction("❌")
+        logger.error(f"Error implementing changes: {e}")
+        await message.reply(f"❌ An error occurred: {str(e)}")

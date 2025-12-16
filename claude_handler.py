@@ -38,6 +38,96 @@ def extract_json_from_response(response_text):
     
     return response_text.strip()
 
+async def gather_requirements(prompt: str, website_context: str, conversation_history: list = None) -> dict:
+    """
+    Ask clarifying questions to understand the user's requirements.
+    Returns: dict with questions asked and whether more info is needed
+    """
+    
+    if conversation_history is None:
+        conversation_history = []
+    
+    system_prompt = """You are an expert web developer helping students modify the Programming Party website.
+Your job is to ask clarifying questions about the requested changes to ensure you understand exactly what needs to be done.
+
+IMPORTANT: You are in the REQUIREMENTS GATHERING phase. Your goal is to ask questions, NOT to make assumptions.
+
+The website is built with 11ty (Eleventy) with:
+- Layout templates in src/_layouts/
+- Page files in src/pages/
+- CSS styling in src/assets/css/style.css
+
+When a student makes a request, you should:
+1. Identify what is unclear or ambiguous
+2. Ask specific, targeted questions to clarify
+3. Ask about:
+   - Specific file locations or page names if not mentioned
+   - Visual styling details (colors, sizes, positioning)
+   - Content specifics (exact text, formatting)
+   - Which files are affected
+   - User expectations for the result
+4. Be concise - ask 2-3 focused questions, not a wall of text
+5. Only after you have clarity, indicate you're ready to implement
+
+Return your response as JSON:
+{
+  "questions": ["Question 1?", "Question 2?"],
+  "ready_to_implement": false,
+  "summary": "What I understand so far..."
+}
+
+If you feel you have enough information to proceed:
+{
+  "questions": [],
+  "ready_to_implement": true,
+  "summary": "Complete understanding of what needs to be done"
+}"""
+
+    messages = conversation_history.copy()
+    
+    if not messages:
+        # First message from user
+        messages.append({"role": "user", "content": f"""Here is the current state of the website:
+
+{website_context}
+
+---
+
+Student request: {prompt}
+
+Ask clarifying questions to understand exactly what changes are needed. Do NOT make assumptions."""})
+    
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            system=system_prompt,
+            messages=messages
+        )
+        
+        response_text = response.content[0].text.strip()
+        json_text = extract_json_from_response(response_text)
+        requirements = json.loads(json_text)
+        
+        logger.info(f"Gathering requirements - Ready: {requirements.get('ready_to_implement', False)}")
+        return requirements
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse requirements response as JSON: {e}")
+        logger.error(f"Response was: {response_text[:500]}")
+        return {
+            "questions": ["I need clarification - can you provide more specific details about your request?"],
+            "ready_to_implement": False,
+            "summary": "Unable to understand request"
+        }
+    except Exception as e:
+        logger.error(f"Error gathering requirements: {e}")
+        return {
+            "questions": ["I encountered an error. Can you rephrase your request?"],
+            "ready_to_implement": False,
+            "summary": "Error occurred"
+        }
+
 async def get_file_changes(prompt: str, website_context: str) -> dict:
     """
     Send prompt to Claude and get file changes
