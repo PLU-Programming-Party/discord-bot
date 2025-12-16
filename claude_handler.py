@@ -210,7 +210,7 @@ Please analyze this request and provide the file changes needed to implement it.
     try:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=8192,
+            max_tokens=16384,
             system=system_prompt,
             messages=[
                 {"role": "user", "content": user_prompt}
