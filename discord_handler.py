@@ -6,7 +6,7 @@ import logging
 from discord.ext import commands
 from claude_handler import gather_requirements, get_file_changes
 from context_loader import get_website_context
-from github_handler import apply_changes, push_to_github
+from github_handler import apply_changes_and_commit
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +136,17 @@ async def implement_changes(message: discord.Message, state: ConversationState, 
         
         # Apply changes to repository
         await message.reply(f"📝 Applying {num_files} file changes...")
-        success = apply_changes(file_changes)
+        commit_hash = apply_changes_and_commit(file_changes, full_prompt)
         
-        if not success:
+        if not commit_hash:
             await message.reply("❌ Failed to apply changes to the repository.")
             return
         
         # Push to GitHub
         await message.reply("🚀 Pushing to GitHub...")
-        push_success = push_to_github()
+        # Push is handled by apply_changes_and_commit
         
-        if push_success:
+        if commit_hash:
             changed_files = [f["path"] for f in file_changes.get("files", [])]
             files_list = "\n".join([f"✅ {f}" for f in changed_files])
             confirmation = f"""✨ Changes deployed successfully!
