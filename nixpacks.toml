@@ -1,5 +1,0 @@
-[build]
-providers = ["python", "apt"]
-
-[build.apt]
-packages = ["git"]
