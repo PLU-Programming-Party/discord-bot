@@ -16,25 +16,42 @@ if not api_key:
 client = Anthropic(api_key=api_key)
 
 def extract_json_from_response(response_text):
-    """Extract JSON from Claude response that may contain explanation text"""
+    """
+    Extract JSON from Claude response with robust handling of escaped content.
+    Uses multiple strategies to find and validate JSON blocks.
+    """
     
-    # First, try to find JSON wrapped in markdown code fences
+    # Strategy 1: Try markdown code fences first
     json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
     if json_match:
         return json_match.group(1).strip()
     
-    # If no markdown fences, try to find raw JSON (starts with {)
+    # Strategy 2: Use regex to find potential JSON objects
+    # This pattern finds balanced braces but isn't perfect for nested structures
+    json_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}'
+    matches = list(re.finditer(json_pattern, response_text, re.DOTALL))
+    
+    if matches:
+        # Try each match in reverse (largest/last first) to find valid JSON
+        for match in reversed(matches):
+            try:
+                candidate = match.group(0)
+                json.loads(candidate)  # Validate it parses correctly
+                return candidate
+            except json.JSONDecodeError:
+                continue
+    
+    # Strategy 3: Find first { and progressively extend until valid JSON is found
     json_start = response_text.find('{')
     if json_start != -1:
-        # Find the matching closing brace by counting braces
-        brace_count = 0
-        for i in range(json_start, len(response_text)):
-            if response_text[i] == '{':
-                brace_count += 1
-            elif response_text[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    return response_text[json_start:i+1]
+        # Try longer and longer substrings starting from the end
+        for end_pos in range(len(response_text), json_start, -1):
+            candidate = response_text[json_start:end_pos]
+            try:
+                json.loads(candidate)
+                return candidate
+            except json.JSONDecodeError:
+                continue
     
     return response_text.strip()
 
@@ -203,7 +220,7 @@ Please analyze this request and provide the file changes needed to implement it.
         # Extract text from response
         response_text = response.content[0].text.strip()
         
-        # Extract JSON from response (handles explanation text + JSON)
+        # Extract JSON from response (handles multiple formats)
         json_text = extract_json_from_response(response_text)
         
         # Parse JSON
