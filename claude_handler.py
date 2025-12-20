@@ -197,7 +197,11 @@ When a student makes a request, you should:
 
 Student request: {prompt}
 
-Please analyze this request and provide the file changes needed to implement it. Return ONLY the JSON object with file changes - no explanations, no markdown code blocks."""
+Please analyze this request and provide the file changes needed to implement it.
+
+IMPORTANT: Always return complete file changes. Never return an empty files array. If the request involves text transformation, use Unicode or CSS to achieve the visual effect.
+
+Return ONLY the JSON object with file changes - no explanations, no markdown code blocks."""
 
     try:
         # Run synchronous API call in thread pool to avoid blocking event loop
