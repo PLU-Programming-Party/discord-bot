@@ -223,7 +223,8 @@ Please analyze this request and provide the file changes needed to implement it.
         num_files = len(file_changes.get('files', []))
         logger.info(f"Claude generated changes for {num_files} files")
         if num_files == 0:
-            logger.warning(f"Claude returned 0 files. Response: {response_text[:1000]}")
+            logger.warning(f"Claude returned 0 files. Extracted JSON: {json_text[:1000]}")
+            logger.warning(f"Full file_changes: {file_changes}")
         return file_changes
         
     except json.JSONDecodeError as e:

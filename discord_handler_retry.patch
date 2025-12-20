@@ -1,0 +1,19 @@
+# In process_suggestion, after we get the state, add retry detection:
+
+    state = user_conversations[user_id]
+    
+    # Check if user is asking to retry
+    retry_keywords = ["try again", "retry", "again", "run it", "run that", "do it", "execute", "go"]
+    is_retry_request = any(keyword in user_prompt.lower() for keyword in retry_keywords)
+    
+    # PHASE 1: Gather Requirements
+    if state.phase == "gathering" and not is_retry_request:
+        # ... existing gathering logic ...
+    
+    # If retry request and we were ready to implement, skip gathering
+    elif is_retry_request and state.phase == "gathering" and state.requirements and state.requirements.get("ready_to_implement"):
+        state.phase = "implementing"
+        await message.reply("⏳ Retrying... Generating changes...")
+        await implement_changes(message, state, website_context)
+        return
+
