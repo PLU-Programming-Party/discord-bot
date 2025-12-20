@@ -220,7 +220,10 @@ Please analyze this request and provide the file changes needed to implement it.
         # Parse JSON
         file_changes = json.loads(json_text)
         
-        logger.info(f"Claude generated changes for {len(file_changes.get('files', []))} files")
+        num_files = len(file_changes.get('files', []))
+        logger.info(f"Claude generated changes for {num_files} files")
+        if num_files == 0:
+            logger.warning(f"Claude returned 0 files. Response: {response_text[:1000]}")
         return file_changes
         
     except json.JSONDecodeError as e:
