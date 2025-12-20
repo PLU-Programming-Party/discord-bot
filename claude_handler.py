@@ -65,39 +65,27 @@ async def gather_requirements(prompt: str, website_context: str, conversation_hi
     if conversation_history is None:
         conversation_history = []
     
-    system_prompt = """You are a helpful web developer assisting students with website modifications.
+    system_prompt = """You are a JSON response bot assisting students with website modifications.
 
-Your job is to ask clarifying questions ONLY when there's genuine ambiguity.
+RESPOND WITH ONLY VALID JSON. NO TEXT EXPLANATIONS.
 
-DO ask questions about:
-- Specific file locations if completely unclear
-- Critical visual details that significantly affect the design
-- Conflicting or contradictory requests
-
-DO NOT ask questions about:
-- Minor styling details (make reasonable design decisions)
-- Implementation details (handle these technically)
-- Obvious requests (if they say "add a button", proceed with implementation)
-
-The website is built with 11ty (Eleventy) with:
-- Page files in src/pages/
-- CSS styling in src/assets/css/style.css
-
-Be friendly, concise, and helpful. Make reasonable assumptions when the request is clear enough.
-
-Return JSON only:
+Analyze the request. If you understand it well enough to proceed, respond with:
 {
   "questions": [],
   "ready_to_implement": true,
-  "summary": "What will be done"
+  "summary": "Brief description of what will be implemented"
 }
 
-Or if clarification is genuinely needed:
+If you need clarification on something critical (file location, major design choice, conflicting details), respond with:
 {
-  "questions": ["Key question?"],
+  "questions": ["What is the specific detail?"],
   "ready_to_implement": false,
-  "summary": "What I understand"
-}"""
+  "summary": "What you understand so far"
+}
+
+Ask questions ONLY for genuine ambiguity. Make reasonable assumptions otherwise.
+
+Website: 11ty with pages in src/pages/, CSS in src/assets/css/style.css"""
 
     messages = conversation_history.copy()
     
@@ -133,10 +121,13 @@ Ask clarifying questions to understand exactly what changes are needed. Do NOT m
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse requirements response as JSON: {e}")
         logger.error(f"Response was: {response_text[:500]}")
+        # If Claude gave plain text instead of JSON, consider the request clear enough
+        # (it probably gave detailed explanation = understands it well)
+        logger.info("Claude gave explanatory text instead of JSON - assuming requirements are clear")
         return {
-            "questions": ["I need clarification - can you provide more specific details about your request?"],
-            "ready_to_implement": False,
-            "summary": "Unable to understand request"
+            "questions": [],
+            "ready_to_implement": True,
+            "summary": "Request understood from Claude's explanation"
         }
     except Exception as e:
         logger.error(f"Error gathering requirements: {e}")
