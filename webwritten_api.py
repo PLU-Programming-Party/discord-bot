@@ -478,3 +478,43 @@ def maintain_sentence_pool():
 
 # Initialize on import
 init_db()
+
+@app.route("/api/webwritten/admin/regenerate", methods=["POST"])
+def regenerate_sentences():
+    """Admin endpoint to regenerate sentences based on current story"""
+    # Simple admin key check (should use proper auth in production)
+    auth = request.headers.get("X-Admin-Key")
+    expected = os.getenv("ADMIN_KEY", "regenerate-please")
+    
+    if auth != expected:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    # Clear old unvoted sentences (keep voted ones)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM pending_sentences WHERE is_active = 1 AND vote_count = 0")
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    
+    # Generate new sentences based on current story
+    new_sentences = generate_sentences_with_llm(50)
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    for sentence in new_sentences:
+        cursor.execute(
+            "INSERT INTO pending_sentences (text, source) VALUES (?, 'llm')",
+            (sentence,)
+        )
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"Regenerated sentences: deleted {deleted} old, added {len(new_sentences)} new")
+    
+    return jsonify({
+        "success": True,
+        "deleted": deleted,
+        "added": len(new_sentences),
+        "story_context": get_current_story()[:100] + "..."
+    })
