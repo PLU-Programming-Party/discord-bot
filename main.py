@@ -1,5 +1,9 @@
 """
 Main entry point for Discord Bot Website Assistant & Webwritten API
+
+For Railway deployment:
+- Flask serves on PORT (exposed to internet)
+- Discord bot runs in background thread
 """
 import os
 import discord
@@ -36,26 +40,16 @@ from apscheduler.triggers.cron import CronTrigger
 # Global scheduler
 scheduler = None
 
-def run_flask():
-    """Run Flask in a separate thread"""
-    port = int(os.getenv("PORT", 5000))
-    logger.info(f"Starting Flask API on port {port}")
-    flask_app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-
 def daily_tasks():
     """Run daily winner selection and pool maintenance"""
     logger.info("Running daily Webwritten tasks...")
     try:
-        # Select winner
         winner = select_daily_winner()
         if winner:
             logger.info(f"Daily winner selected: {winner['sentence'][:50]}...")
         else:
             logger.info("No winner today (not enough votes)")
-        
-        # Maintain sentence pool
         maintain_sentence_pool()
-        
     except Exception as e:
         logger.error(f"Error in daily tasks: {e}")
 
@@ -63,8 +57,6 @@ def setup_scheduler():
     """Set up the daily scheduler"""
     global scheduler
     scheduler = BackgroundScheduler()
-    
-    # Run daily at midnight UTC
     scheduler.add_job(
         daily_tasks,
         CronTrigger(hour=0, minute=0, timezone="UTC"),
@@ -72,7 +64,6 @@ def setup_scheduler():
         name="Daily Webwritten Winner Selection",
         replace_existing=True
     )
-    
     scheduler.start()
     logger.info("Scheduler started - daily tasks at midnight UTC")
 
@@ -83,46 +74,53 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Don't respond to own messages
     if message.author == bot.user:
         return
-    
-    # Only process in the designated channel
-    channel_id = int(os.getenv("DISCORD_CHANNEL_ID"))
+    channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
     if message.channel.id != channel_id:
         return
-    
-    # Process the prompt
     await setup_discord_handler(bot, message)
 
-async def main():
-    """Start the bot and API"""
+def run_discord_bot():
+    """Run Discord bot in a separate thread"""
     try:
-        # Initialize repo
         init_repo()
-        
-        # Seed initial Webwritten content
-        logger.info("Seeding Webwritten content...")
-        seed_initial_content()
-        
-        # Start Flask in a separate thread
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        
-        # Set up scheduler
-        setup_scheduler()
-        
-        # Start bot
         token = os.getenv("DISCORD_TOKEN")
         if not token:
-            raise ValueError("DISCORD_TOKEN not found in .env")
+            logger.error("DISCORD_TOKEN not found")
+            return
         
-        await bot.start(token)
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot.start(token))
     except Exception as e:
-        logger.error(f"Error starting bot: {e}")
-        if scheduler:
-            scheduler.shutdown()
-        raise
+        logger.error(f"Error in Discord bot: {e}")
+
+# Health check endpoint
+@flask_app.route("/health")
+def health():
+    return {"status": "ok", "service": "webwritten-api"}
+
+@flask_app.route("/")
+def root():
+    return {"status": "ok", "message": "Webwritten API is running", "endpoints": ["/api/webwritten/story", "/api/webwritten/vote", "/api/webwritten/submit", "/api/webwritten/stats"]}
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logger.info("Starting services...")
+    
+    # Seed initial content
+    seed_initial_content()
+    
+    # Start scheduler
+    setup_scheduler()
+    
+    # Start Discord bot in background thread
+    discord_thread = threading.Thread(target=run_discord_bot, daemon=True)
+    discord_thread.start()
+    logger.info("Discord bot thread started")
+    
+    # Run Flask (main thread - this is what Railway exposes)
+    port = int(os.getenv("PORT", 5000))
+    logger.info(f"Starting Flask API on port {port}")
+    flask_app.run(host="0.0.0.0", port=port, threaded=True)
