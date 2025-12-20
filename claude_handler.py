@@ -224,6 +224,10 @@ Return ONLY the JSON object with file changes - no explanations, no markdown cod
         # Parse JSON
         file_changes = json.loads(json_text)
         
+        # If Claude returned a single file object instead of wrapped in files array, wrap it
+        if isinstance(file_changes, dict) and 'path' in file_changes and 'content' in file_changes:
+            file_changes = {'files': [file_changes]}
+        
         num_files = len(file_changes.get('files', []))
         logger.info(f"Claude generated changes for {num_files} files")
         if num_files == 0:
