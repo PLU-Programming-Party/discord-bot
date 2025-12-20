@@ -1,5 +1,5 @@
 """
-Claude API integration - generates file changes based on prompts
+Claude API integration with tool use - generates file changes based on prompts
 """
 import os
 import json
@@ -16,36 +16,307 @@ if not api_key:
     raise ValueError("CLAUDE_API_KEY not found in environment variables")
 client = Anthropic(api_key=api_key)
 
-def extract_json_from_response(response_text):
-    """
-    Extract JSON from Claude response with robust handling of escaped content.
-    Uses multiple strategies to find and validate JSON blocks.
-    """
+# Use Opus for better reasoning
+MODEL = "claude-opus-4-20250514"
+
+# Define tools for Claude to use
+TOOLS = [
+    {
+        "name": "read_file",
+        "description": "Read the contents of a file from the website repository. Use this to understand current file structure and content before making changes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file path relative to the repository root (e.g., 'src/pages/about.md', 'src/_layouts/base.njk')"
+                }
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "list_directory",
+        "description": "List files and directories in a given path. Use this to explore the project structure.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The directory path relative to the repository root (e.g., 'src/pages', 'src/_layouts')"
+                }
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "write_file",
+        "description": "Write or modify a file in the website repository. Always provide the COMPLETE file content - partial updates are not supported.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file path relative to the repository root"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The COMPLETE content to write to the file"
+                }
+            },
+            "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "ask_user",
+        "description": "Ask the user a clarifying question when something is ambiguous. Only use this for genuine ambiguity.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the user"
+                }
+            },
+            "required": ["question"]
+        }
+    },
+    {
+        "name": "complete",
+        "description": "Signal that the task is complete. Use this when all changes have been written successfully.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "A brief summary of what was accomplished"
+                },
+                "files_changed": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of file paths that were modified"
+                }
+            },
+            "required": ["summary", "files_changed"]
+        }
+    }
+]
+
+# Tool execution functions
+def execute_read_file(repo_path: str, file_path: str) -> str:
+    """Read a file from the repository"""
+    full_path = os.path.join(repo_path, file_path)
+    try:
+        if not os.path.exists(full_path):
+            return f"Error: File '{file_path}' does not exist"
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return content
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+def execute_list_directory(repo_path: str, dir_path: str) -> str:
+    """List contents of a directory"""
+    full_path = os.path.join(repo_path, dir_path) if dir_path else repo_path
+    try:
+        if not os.path.exists(full_path):
+            return f"Error: Directory '{dir_path}' does not exist"
+        entries = os.listdir(full_path)
+        result = []
+        for entry in sorted(entries):
+            entry_path = os.path.join(full_path, entry)
+            if os.path.isdir(entry_path):
+                result.append(f"📁 {entry}/")
+            else:
+                result.append(f"📄 {entry}")
+        return "\n".join(result) if result else "(empty directory)"
+    except Exception as e:
+        return f"Error listing directory: {str(e)}"
+
+def execute_write_file(repo_path: str, file_path: str, content: str) -> str:
+    """Write content to a file"""
+    full_path = os.path.join(repo_path, file_path)
+    try:
+        # Create directories if needed
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return f"Successfully wrote {len(content)} bytes to {file_path}"
+    except Exception as e:
+        return f"Error writing file: {str(e)}"
+
+
+class AgentSession:
+    """Manages a multi-turn agent session with Claude"""
     
-    # Strategy 1: Try markdown code fences first
+    def __init__(self, repo_path: str):
+        self.repo_path = repo_path
+        self.messages = []
+        self.files_changed = []
+        self.is_complete = False
+        self.completion_summary = None
+        self.pending_question = None
+        self.max_iterations = 20  # Safety limit
+        
+    def get_system_prompt(self):
+        return """You are an expert web developer helping students modify the Programming Party website.
+
+The website is built with 11ty (Eleventy) and includes:
+- Layout templates in src/_layouts/
+- Page files in src/pages/
+- CSS styling in src/assets/css/style.css
+
+You have tools to explore the codebase and make changes. Use them to:
+1. First understand the current state by reading relevant files
+2. Plan your changes
+3. Write the complete modified files
+4. Signal completion when done
+
+IMPORTANT RULES:
+- Always read files before modifying them to understand current content
+- When writing files, include the COMPLETE content - partial updates don't work
+- Preserve existing functionality when making changes
+- If something is ambiguous, ask the user ONE focused question
+- Be efficient - don't read every file, just the relevant ones
+- When modifying navigation, also update src/_layouts/base.njk
+
+After making all changes, use the 'complete' tool to finish."""
+
+    async def process_tool_call(self, tool_name: str, tool_input: dict) -> tuple[str, bool]:
+        """
+        Process a tool call and return (result, should_continue)
+        Returns should_continue=False if we need to wait for user input or task is complete
+        """
+        logger.info(f"Tool call: {tool_name}")
+        
+        if tool_name == "read_file":
+            result = execute_read_file(self.repo_path, tool_input["path"])
+            return result, True
+            
+        elif tool_name == "list_directory":
+            result = execute_list_directory(self.repo_path, tool_input.get("path", ""))
+            return result, True
+            
+        elif tool_name == "write_file":
+            result = execute_write_file(self.repo_path, tool_input["path"], tool_input["content"])
+            if "Successfully wrote" in result:
+                self.files_changed.append(tool_input["path"])
+            return result, True
+            
+        elif tool_name == "ask_user":
+            self.pending_question = tool_input["question"]
+            return "Question sent to user. Waiting for response.", False
+            
+        elif tool_name == "complete":
+            self.is_complete = True
+            self.completion_summary = tool_input.get("summary", "Changes complete")
+            return "Task marked as complete.", False
+            
+        else:
+            return f"Unknown tool: {tool_name}", True
+
+    async def run_agent_loop(self, initial_prompt: str = None):
+        """
+        Run the agent loop until completion, question, or max iterations
+        Returns: (status, message)
+        - ("complete", summary) - Task finished
+        - ("question", question) - Need user input
+        - ("error", message) - Something went wrong
+        """
+        
+        # Add initial user message if provided
+        if initial_prompt:
+            self.messages.append({"role": "user", "content": initial_prompt})
+        
+        iteration = 0
+        while iteration < self.max_iterations:
+            iteration += 1
+            logger.info(f"Agent iteration {iteration}")
+            
+            try:
+                # Call Claude with tools
+                response = await asyncio.to_thread(
+                    client.messages.create,
+                    model=MODEL,
+                    max_tokens=8192,
+                    system=self.get_system_prompt(),
+                    tools=TOOLS,
+                    messages=self.messages
+                )
+                
+                # Check stop reason
+                if response.stop_reason == "end_turn":
+                    # Claude finished without using tools - extract any text response
+                    text_content = ""
+                    for block in response.content:
+                        if hasattr(block, 'text'):
+                            text_content += block.text
+                    
+                    if self.files_changed:
+                        return ("complete", f"Changes made to: {', '.join(self.files_changed)}")
+                    else:
+                        return ("complete", text_content or "Task completed (no files changed)")
+                
+                elif response.stop_reason == "tool_use":
+                    # Process tool calls
+                    assistant_content = response.content
+                    self.messages.append({"role": "assistant", "content": assistant_content})
+                    
+                    tool_results = []
+                    should_continue = True
+                    
+                    for block in assistant_content:
+                        if block.type == "tool_use":
+                            result, continue_loop = await self.process_tool_call(
+                                block.name, 
+                                block.input
+                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result
+                            })
+                            if not continue_loop:
+                                should_continue = False
+                    
+                    # Add tool results to messages
+                    self.messages.append({"role": "user", "content": tool_results})
+                    
+                    # Check if we need to pause
+                    if self.is_complete:
+                        return ("complete", self.completion_summary)
+                    
+                    if self.pending_question:
+                        return ("question", self.pending_question)
+                    
+                    if not should_continue:
+                        break
+                        
+                else:
+                    logger.warning(f"Unexpected stop reason: {response.stop_reason}")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Error in agent loop: {e}")
+                return ("error", str(e))
+        
+        return ("error", "Max iterations reached")
+
+    def add_user_response(self, response: str):
+        """Add a user's response to a question"""
+        self.messages.append({"role": "user", "content": response})
+        self.pending_question = None
+
+
+# Legacy functions for compatibility (simplified wrappers)
+def extract_json_from_response(response_text):
+    """Extract JSON from Claude response - kept for compatibility"""
     json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
     if json_match:
         return json_match.group(1).strip()
     
-    # Strategy 2: Use regex to find potential JSON objects
-    # This pattern finds balanced braces but isn't perfect for nested structures
-    json_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}'
-    matches = list(re.finditer(json_pattern, response_text, re.DOTALL))
-    
-    if matches:
-        # Try each match in reverse (largest/last first) to find valid JSON
-        for match in reversed(matches):
-            try:
-                candidate = match.group(0)
-                json.loads(candidate)  # Validate it parses correctly
-                return candidate
-            except json.JSONDecodeError:
-                continue
-    
-    # Strategy 3: Find first { and progressively extend until valid JSON is found
     json_start = response_text.find('{')
     if json_start != -1:
-        # Try longer and longer substrings starting from the end
         for end_pos in range(len(response_text), json_start, -1):
             candidate = response_text[json_start:end_pos]
             try:
@@ -56,189 +327,50 @@ def extract_json_from_response(response_text):
     
     return response_text.strip()
 
+
 async def gather_requirements(prompt: str, website_context: str, conversation_history: list = None) -> dict:
     """
-    Ask clarifying questions to understand the user's requirements.
-    Returns: dict with questions asked and whether more info is needed
+    Legacy function - now just returns ready to implement since agent handles clarification
     """
-    
-    if conversation_history is None:
-        conversation_history = []
-    
-    system_prompt = """You are a JSON response bot assisting students with website modifications.
+    return {
+        "questions": [],
+        "ready_to_implement": True,
+        "summary": prompt
+    }
 
-RESPOND WITH ONLY VALID JSON. NO TEXT EXPLANATIONS.
-
-Analyze the request. If you understand it well enough to proceed, respond with:
-{
-  "questions": [],
-  "ready_to_implement": true,
-  "summary": "Brief description of what will be implemented"
-}
-
-If you need clarification on something critical (file location, major design choice, conflicting details), respond with:
-{
-  "questions": ["What is the specific detail?"],
-  "ready_to_implement": false,
-  "summary": "What you understand so far"
-}
-
-Ask questions ONLY for genuine ambiguity. Make reasonable assumptions otherwise.
-
-Website: 11ty with pages in src/pages/, CSS in src/assets/css/style.css"""
-
-    messages = conversation_history.copy()
-    
-    if not messages:
-        # First message from user
-        messages.append({"role": "user", "content": f"""Here is the current state of the website:
-
-{website_context}
-
----
-
-Student request: {prompt}
-
-Ask clarifying questions to understand exactly what changes are needed. Do NOT make assumptions."""})
-    
-    try:
-        # Run synchronous API call in thread pool to avoid blocking event loop
-        response = await asyncio.to_thread(
-            client.messages.create,
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=system_prompt,
-            messages=messages
-        )
-        
-        response_text = response.content[0].text.strip()
-        json_text = extract_json_from_response(response_text)
-        requirements = json.loads(json_text)
-        
-        logger.info(f"Gathering requirements - Ready: {requirements.get('ready_to_implement', False)}")
-        return requirements
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse requirements response as JSON: {e}")
-        logger.error(f"Response was: {response_text[:500]}")
-        # If Claude gave plain text instead of JSON, consider the request clear enough
-        # (it probably gave detailed explanation = understands it well)
-        logger.info("Claude gave explanatory text instead of JSON - assuming requirements are clear")
-        return {
-            "questions": [],
-            "ready_to_implement": True,
-            "summary": "Request understood from Claude's explanation"
-        }
-    except Exception as e:
-        logger.error(f"Error gathering requirements: {e}")
-        return {
-            "questions": ["I encountered an error. Can you rephrase your request?"],
-            "ready_to_implement": False,
-            "summary": "Error occurred"
-        }
 
 async def get_file_changes(prompt: str, website_context: str) -> dict:
     """
-    Send prompt to Claude and get file changes
-    Returns: dict with list of file changes
+    Legacy function - kept for compatibility but agent-based approach is preferred
     """
+    system_prompt = """You are an expert web developer. Return ONLY valid JSON with file changes.
     
-    system_prompt = """You are an expert web developer helping students modify the Programming Party website.
-The website is built with 11ty (Eleventy) and includes:
-- Layout templates in src/_layouts/
-- Page files in src/pages/ (MUST use this directory, not src/ root!)
-- CSS styling in src/assets/css/style.css
-- Configuration in .eleventy.js
-
-CRITICAL RULES - READ CAREFULLY:
-
-1. **COMPLETE FILE CONTENT**: You will receive the COMPLETE content of each file below. When you modify a file, return the ENTIRE new content from start to finish. Do NOT truncate, summarize, or return only the changed lines. The entire content you return will be written exactly as-is to the file.
-2. **File Paths**: 
-   - Page files MUST be in src/pages/ (e.g., src/pages/about.md)
-   - CSS MUST be at src/assets/css/style.css (do NOT split into multiple CSS files)
-   - Layouts MUST be in src/_layouts/ (do NOT move them)
-
-3. **Preservation**: When modifying a file, PRESERVE all existing content and functionality that isn't being changed. For example:
-   - When modifying CSS, keep all existing classes and styles
-   - When modifying HTML, keep all existing structure and elements
-   - Do NOT remove sections or simplify code
-
-4. **Return Format**: Return ONLY valid JSON with complete file contents:
+Format:
 {
   "files": [
-    {
-      "path": "src/assets/css/style.css",
-      "content": "/* COMPLETE CSS from start to end including all existing styles */"
-    },
-    {
-      "path": "src/pages/about.md",
-      "content": "---\\nlayout: base\\n...\\nCOMPLETE FILE CONTENT"
-    }
+    {"path": "src/pages/example.md", "content": "complete file content..."}
   ]
-}
-
-5. **String Formatting in JSON**:
-   - Escape newlines as \\n (not actual line breaks)
-   - Escape backslashes as \\\\
-   - Escape quotes as \\"
-   - Return ONLY the JSON block, no explanations or markdown code blocks
-
-When a student makes a request, you should:
-1. Read the complete file contents provided
-2. Understand what changes are needed
-3. Return the COMPLETE modified file with ALL original content preserved
-4. Be conservative - make minimal changes to achieve the request"""
-
-    user_prompt = f"""Here is the current state of the Programming Party website:
-
-{website_context}
-
----
-
-Student request: {prompt}
-
-Please analyze this request and provide the file changes needed to implement it.
-
-IMPORTANT: Always return complete file changes. Never return an empty files array. If the request involves text transformation, use Unicode or CSS to achieve the visual effect.
-
-Return ONLY the JSON object with file changes - no explanations, no markdown code blocks."""
+}"""
 
     try:
-        # Run synchronous API call in thread pool to avoid blocking event loop
         response = await asyncio.to_thread(
             client.messages.create,
-            model="claude-sonnet-4-20250514",
+            model=MODEL,
             max_tokens=16384,
             system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ]
+            messages=[{"role": "user", "content": f"{website_context}\n\n---\n\nRequest: {prompt}"}]
         )
         
-        # Extract text from response
         response_text = response.content[0].text.strip()
-        
-        # Extract JSON from response (handles multiple formats)
         json_text = extract_json_from_response(response_text)
-        
-        # Parse JSON
         file_changes = json.loads(json_text)
         
-        # If Claude returned a single file object instead of wrapped in files array, wrap it
         if isinstance(file_changes, dict) and 'path' in file_changes and 'content' in file_changes:
             file_changes = {'files': [file_changes]}
         
-        num_files = len(file_changes.get('files', []))
-        logger.info(f"Claude generated changes for {num_files} files")
-        if num_files == 0:
-            logger.warning(f"Claude returned 0 files. Extracted JSON: {json_text[:1000]}")
-            logger.warning(f"Full file_changes: {file_changes}")
+        logger.info(f"Claude generated changes for {len(file_changes.get('files', []))} files")
         return file_changes
         
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Claude response as JSON: {e}")
-        logger.error(f"Response was: {response_text[:500]}")
-        return None
     except Exception as e:
         logger.error(f"Error calling Claude: {e}")
         return None

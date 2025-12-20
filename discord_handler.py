@@ -1,188 +1,115 @@
 """
-Discord bot interactions and message handling
+Discord bot interactions and message handling - Agent-based approach
 """
 import discord
 import logging
+import os
 from discord.ext import commands
-from claude_handler import gather_requirements, get_file_changes
-from context_loader import get_website_context
-from github_handler import apply_changes_and_commit
+from claude_handler import AgentSession
+from github_handler import push_changes
 
 logger = logging.getLogger(__name__)
 
-# Store ongoing conversations by user ID
-user_conversations = {}
+# Store ongoing agent sessions by user ID
+user_sessions = {}
 
-class ConversationState:
-    def __init__(self, user_id, initial_prompt):
-        self.user_id = user_id
-        self.initial_prompt = initial_prompt
-        self.conversation_history = []
-        self.requirements = None
-        self.phase = "gathering"  # "gathering" or "implementing"
-    
-    def add_message(self, role, content):
-        """Add a message to the conversation history"""
-        self.conversation_history.append({"role": role, "content": content})
-    
-    def get_full_context(self):
-        """Get the full conversation for Claude"""
-        return self.conversation_history
+# Repository path
+REPO_PATH = "./website_repo"
 
 async def process_suggestion(message: discord.Message):
     """
-    Process a user's website modification suggestion
-    Phase 1: Gather requirements (ask clarifying questions)
-    Phase 2: Implement changes (once requirements are clear)
+    Process a user's website modification suggestion using the agent approach
     """
     user_id = message.author.id
     user_prompt = message.content
+    
     # HAL 9000 Easter egg for users with "dav" in their name
     if "dav" in message.author.name.lower():
         await message.reply("I'm sorry dav, but I can't do that.")
         return
-
     
-    # Initialize or retrieve conversation
-    if user_id not in user_conversations:
-        user_conversations[user_id] = ConversationState(user_id, user_prompt)
-        logger.info(f"Processing prompt from {message.author.name}: {user_prompt}")
-    else:
-        # User is responding to questions
-        logger.info(f"User {message.author.name} responding: {user_prompt}")
-        user_conversations[user_id].add_message("user", user_prompt)
+    # Check if user has an existing session waiting for a response
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        if session.pending_question:
+            # User is responding to a question
+            logger.info(f"User {message.author.name} responding to question: {user_prompt}")
+            session.add_user_response(user_prompt)
+            await message.reply("⏳ Got it, continuing with your request...")
+            
+            # Continue the agent loop
+            status, result = await session.run_agent_loop()
+            await handle_agent_result(message, session, status, result)
+            return
     
-    # Load website context
-    website_context = get_website_context()
-    if not website_context:
-        await message.reply("I couldn't load the website context. Please try again later.")
+    # New request - create a new session
+    logger.info(f"New request from {message.author.name}: {user_prompt}")
+    
+    # Check repo exists
+    if not os.path.exists(REPO_PATH):
+        await message.reply("❌ Website repository not found. Please try again later.")
         return
     
-    state = user_conversations[user_id]
+    # Create agent session
+    session = AgentSession(REPO_PATH)
+    user_sessions[user_id] = session
     
-    # Check if user is asking to retry without re-asking questions
-    retry_keywords = ["try again", "retry", "again", "run it", "run that", "do it", "execute"]
-    is_retry_request = any(keyword in user_prompt.lower() for keyword in retry_keywords)
+    await message.reply("🤖 Working on your request... I'll explore the codebase and make the changes.")
     
-    # If retry request and we already gathered requirements, skip to implementation
-    if is_retry_request and state.phase == "gathering" and state.requirements and state.requirements.get("ready_to_implement"):
-        logger.info(f"User {message.author.name} requesting retry - skipping to implementation")
-        state.phase = "implementing"
-        await message.reply("⏳ Retrying... Generating changes...")
-        await implement_changes(message, state, website_context)
-        return
-    
-    # PHASE 1: Gather Requirements
-    if state.phase == "gathering":
-        logger.info("Phase: Gathering Requirements")
-        
-        requirements = await gather_requirements(
-            state.initial_prompt,
-            website_context,
-            state.conversation_history if state.conversation_history else None
-        )
-        
-        if requirements.get("questions"):
-            # Ask the questions
-            questions_text = "\n".join([f"• {q}" for q in requirements["questions"]])
-            response = f"I have some questions to better understand your request:\n\n{questions_text}"
-            await message.reply(response)
-            
-            # Add Claude's questions to history
-            state.add_message("assistant", f"Questions: {requirements['questions']}")
-            state.requirements = requirements
-            
-        elif requirements.get("ready_to_implement"):
-            # Ready to proceed
-            logger.info(f"Ready to implement: {requirements.get('summary')}")
-            state.phase = "implementing"
-            await message.reply("Got it! I understand the requirements. Now generating the changes...")
-            
-            # Proceed to implementation
-            await implement_changes(message, state, website_context)
-        else:
-            await message.reply("I need clarification. Could you provide more specific details about your request?")
-    
-    # PHASE 2: Implement Changes
-    elif state.phase == "implementing":
-        # Re-check if we now have enough info
-        requirements = await gather_requirements(
-            state.initial_prompt,
-            website_context,
-            state.conversation_history
-        )
-        
-        if requirements.get("ready_to_implement"):
-            logger.info("Implementing after clarifications")
-            await implement_changes(message, state, website_context)
-        else:
-            # Still need more info
-            questions_text = "\n".join([f"• {q}" for q in requirements["questions"]])
-            response = f"I still have some questions:\n\n{questions_text}"
-            await message.reply(response)
-            state.requirements = requirements
+    # Run the agent
+    status, result = await session.run_agent_loop(user_prompt)
+    await handle_agent_result(message, session, status, result)
 
-async def implement_changes(message: discord.Message, state: ConversationState, website_context: str):
-    """Generate and apply the file changes"""
-    try:
-        # Full prompt with conversation context
-        full_prompt = state.initial_prompt
-        if state.conversation_history:
-            clarifications = "\n".join([
-                msg["content"] for msg in state.conversation_history if msg["role"] == "user"
-            ])
-            full_prompt = f"{state.initial_prompt}\n\nClarifications provided:\n{clarifications}"
+
+async def handle_agent_result(message: discord.Message, session: AgentSession, status: str, result: str):
+    """Handle the result from the agent loop"""
+    user_id = message.author.id
+    
+    if status == "question":
+        # Agent needs clarification
+        await message.reply(f"❓ {result}")
+        # Keep session alive for response
         
-        logger.info("Generating file changes...")
-        await message.reply("⏳ Generating changes...")
-        
-        # Get file changes from Claude
-        file_changes = await get_file_changes(full_prompt, website_context)
-        
-        if not file_changes:
-            await message.reply("❌ Failed to generate changes. Please try again.")
-            return
-        
-        num_files = len(file_changes.get("files", []))
-        logger.info(f"Generated changes for {num_files} files")
-        
-        if num_files == 0:
-            await message.reply("❌ No changes were generated. The request may be unclear or not appropriate. Try being more specific or ask to try again.")
-            return
-        
-        # Apply changes to repository
-        await message.reply(f"📝 Applying {num_files} file changes...")
-        commit_hash = apply_changes_and_commit(file_changes, full_prompt)
-        
-        if not commit_hash:
-            await message.reply("❌ Failed to apply changes to the repository.")
-            return
-        
-        # Push to GitHub
-        await message.reply("🚀 Pushing to GitHub...")
-        # Push is handled by apply_changes_and_commit
-        
-        if commit_hash:
-            changed_files = [f["path"] for f in file_changes.get("files", [])]
-            files_list = "\n".join([f"✅ {f}" for f in changed_files])
-            confirmation = f"""✨ Changes deployed successfully!
+    elif status == "complete":
+        # Agent finished - commit and push changes
+        if session.files_changed:
+            logger.info(f"Agent completed. Files changed: {session.files_changed}")
+            await message.reply(f"📝 Changes made to {len(session.files_changed)} files. Pushing to GitHub...")
+            
+            try:
+                # Commit and push
+                commit_message = f"Bot: {message.content[:50]}..." if len(message.content) > 50 else f"Bot: {message.content}"
+                success = push_changes(REPO_PATH, session.files_changed, commit_message)
+                
+                if success:
+                    files_list = "\n".join([f"✅ {f}" for f in session.files_changed])
+                    await message.reply(f"""✨ Changes deployed successfully!
 
 Modified files:
 {files_list}
 
-The website will update in a few moments..."""
-            await message.reply(confirmation)
-            logger.info(f"Successfully deployed changes")
-            
-            # Clean up conversation
-            if state.user_id in user_conversations:
-                del user_conversations[state.user_id]
+{result}
+
+The website will update in a few moments...""")
+                else:
+                    await message.reply("⚠️ Changes were made locally but failed to push to GitHub.")
+                    
+            except Exception as e:
+                logger.error(f"Error pushing changes: {e}")
+                await message.reply(f"⚠️ Changes made but error pushing: {str(e)}")
         else:
-            await message.reply("⚠️ Changes applied but failed to push to GitHub. Please check the repository.")
-    
-    except Exception as e:
-        logger.error(f"Error implementing changes: {e}")
-        await message.reply(f"❌ An error occurred: {str(e)}")
+            await message.reply(f"ℹ️ {result}")
+        
+        # Clean up session
+        if user_id in user_sessions:
+            del user_sessions[user_id]
+            
+    elif status == "error":
+        await message.reply(f"❌ Error: {result}")
+        # Clean up session
+        if user_id in user_sessions:
+            del user_sessions[user_id]
+
 
 async def setup_discord_handler(bot, message: discord.Message):
     """

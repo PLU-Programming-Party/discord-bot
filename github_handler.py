@@ -42,6 +42,57 @@ def init_repo():
         repo.config_writer().set_value("user", "email", os.getenv("GITHUB_USER_EMAIL", "bot@programmingparty.plu.edu")).release()
         repo.config_writer().set_value("user", "name", os.getenv("GITHUB_USER_NAME", "Programming Party Bot")).release()
 
+
+def push_changes(repo_path: str, files_changed: list, commit_message: str) -> bool:
+    """
+    Commit and push changes made by the agent
+    Args:
+        repo_path: Path to the repository
+        files_changed: List of file paths that were modified
+        commit_message: Commit message
+    Returns: True if successful
+    """
+    try:
+        r = Repo(repo_path)
+        
+        # Pull latest to avoid conflicts
+        try:
+            r.remotes.origin.pull()
+        except GitCommandError as e:
+            logger.warning(f"Could not pull before push: {e}")
+        
+        # Stage all changed files
+        for file_path in files_changed:
+            r.index.add([file_path])
+            logger.info(f"Staged: {file_path}")
+        
+        # Commit
+        commit = r.index.commit(commit_message)
+        logger.info(f"Committed: {commit.hexsha[:7]}")
+        
+        # Push
+        github_token = os.getenv("GITHUB_TOKEN")
+        github_owner = os.getenv("GITHUB_REPO_OWNER")
+        github_name = os.getenv("GITHUB_REPO_NAME")
+        
+        try:
+            r.remotes.origin.push()
+        except GitCommandError:
+            # Use token URL if standard push fails
+            if github_token and github_owner and github_name:
+                repo_url = f"https://x-access-token:{github_token}@github.com/{github_owner}/{github_name}.git"
+                r.git.push(repo_url, "HEAD:main")
+            else:
+                raise
+        
+        logger.info("Pushed changes to origin/main")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error pushing changes: {e}")
+        return False
+
+
 def apply_changes_and_commit(file_changes: dict, prompt: str) -> str:
     """
     Apply file changes and commit to the repository
@@ -116,6 +167,7 @@ def apply_changes_and_commit(file_changes: dict, prompt: str) -> str:
     except Exception as e:
         logger.error(f"Error applying changes: {e}")
         raise
+
 
 def rollback_commit(commit_hash: str) -> bool:
     """
